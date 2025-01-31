@@ -78,6 +78,11 @@ func NewClient(config Config) (*Client, error) {
 		return nil, fmt.Errorf("NATS URL is required")
 	}
 
+	// Validate NATS URL
+	if !strings.HasPrefix(config.NatsURL, "nats://") {
+		return nil, fmt.Errorf("invalid NATS URL format: must start with 'nats://'")
+	}
+
 	// Set default values
 	if config.StreamName == "" {
 		config.StreamName = "ZENTASK"
@@ -88,8 +93,9 @@ func NewClient(config Config) (*Client, error) {
 		nats.Name("ZenTask Client"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
+		nats.Timeout(5 * time.Second), // Connection timeout
 	}
-	
+
 	nc, err := nats.Connect(config.NatsURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
@@ -99,7 +105,14 @@ func NewClient(config Config) (*Client, error) {
 	js, err := nc.JetStream()
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("failed to create JetStream context: %v", err)
+		return nil, fmt.Errorf("failed to create JetStream context: %w", err)
+	}
+
+	// Verify stream exists
+	_, err = js.StreamInfo(config.StreamName)
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("stream '%s' not found: %w", config.StreamName, err)
 	}
 
 	return &Client{

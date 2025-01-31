@@ -81,6 +81,7 @@ func TestNewClient(t *testing.T) {
 		name    string
 		config  Config
 		wantErr bool
+		errMsg  string
 	}{
 		{
 			name: "valid config",
@@ -88,6 +89,7 @@ func TestNewClient(t *testing.T) {
 				NatsURL:       url,
 				RetryAttempts: 3,
 				RetryBackoff:  time.Second,
+				StreamName:    "ZENTASK",
 			},
 			wantErr: false,
 		},
@@ -99,15 +101,27 @@ func TestNewClient(t *testing.T) {
 				RetryBackoff:  time.Second,
 			},
 			wantErr: true,
+			errMsg:  "NATS URL is required",
 		},
 		{
-			name: "invalid NATS URL",
+			name: "invalid NATS URL format",
 			config: Config{
 				NatsURL:       "invalid://localhost:4222",
 				RetryAttempts: 3,
 				RetryBackoff:  time.Second,
 			},
 			wantErr: true,
+			errMsg:  "invalid NATS URL format: must start with 'nats://'",
+		},
+		{
+			name: "invalid NATS URL connection",
+			config: Config{
+				NatsURL:       "nats://nonexistent:4222",
+				RetryAttempts: 3,
+				RetryBackoff:  time.Second,
+			},
+			wantErr: true,
+			errMsg:  "failed to connect to NATS",
 		},
 	}
 
@@ -115,11 +129,14 @@ func TestNewClient(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client, err := NewClient(tt.config)
 			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Nil(t, client)
+				require.Error(t, err)
+				if tt.errMsg != "" {
+					require.Contains(t, err.Error(), tt.errMsg)
+				}
+				require.Nil(t, client)
 			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, client)
+				require.NoError(t, err)
+				require.NotNil(t, client)
 				client.Close()
 			}
 		})

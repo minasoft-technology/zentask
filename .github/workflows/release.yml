@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags
+
+permissions:
+  contents: write # Needed for creating releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for generating changelog
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21' # Use the latest stable Go version
+          cache: true
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0)
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^)
+          # If this is the first tag, use the initial commit
+          if [ -z "$PREVIOUS_TAG" ]; then
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          # Generate changelog
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "## What's Changed" >> $GITHUB_OUTPUT
+          git log --pretty=format:"* %s (%h)" $PREVIOUS_TAG..$LATEST_TAG >> $GITHUB_OUTPUT
+          echo -e "\n\n## Installation" >> $GITHUB_OUTPUT
+          echo '```go' >> $GITHUB_OUTPUT
+          echo "go get github.com/minasoft-technology/zentask@$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo '```' >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate documentation
+        run: |
+          go install golang.org/x/tools/cmd/godoc@latest
+          # Generate documentation for the package
+          godoc -html . > docs.html
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: ${{ steps.changelog.outputs.CHANGELOG }}
+          draft: false
+          prerelease: false
+          files: |
+            LICENSE
+            README.md
+            docs.html
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
