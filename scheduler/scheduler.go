@@ -50,8 +50,9 @@ func (s *Scheduler) AddSchedule(schedule *Schedule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Parse cron expression
-	cronSchedule, err := cron.ParseStandard(schedule.CronExpr)
+	// Parse cron expression with support for seconds field
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	cronSchedule, err := parser.Parse(schedule.CronExpr)
 	if err != nil {
 		return fmt.Errorf("invalid cron expression: %v", err)
 	}
@@ -80,6 +81,7 @@ func (s *Scheduler) AddSchedule(schedule *Schedule) error {
 		}
 		task.Metadata["scheduler_id"] = schedule.ID
 		task.Metadata["scheduled_at"] = schedule.LastRun
+		task.Metadata["cron_expression"] = schedule.CronExpr
 
 		// Enqueue the task
 		_, err := s.client.EnqueueContext(s.ctx, task)
