@@ -84,9 +84,15 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	// Connect to NATS
-	nc, err := nats.Connect(config.NatsURL)
+	opts := []nats.Option{
+		nats.Name("ZenTask Client"),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+	}
+	
+	nc, err := nats.Connect(config.NatsURL, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to NATS: %v", err)
+		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
 	// Create JetStream context

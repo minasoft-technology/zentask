@@ -297,6 +297,13 @@ func (s *Server) processMessage(msg *nats.Msg, handler TaskHandler) {
 		Metadata: taskMsg.Metadata,
 	}
 
+	// Check if it's time to process the task
+	if !taskMsg.ProcessAt.IsZero() && time.Now().Before(taskMsg.ProcessAt) {
+		// Not time to process yet, NAK for redelivery
+		msg.Nak()
+		return
+	}
+
 	// Unmarshal payload if present
 	if len(taskMsg.Payload) > 0 {
 		var payload interface{}

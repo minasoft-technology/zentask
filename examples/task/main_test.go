@@ -182,7 +182,7 @@ func TestTaskExamples(t *testing.T) {
 
 	// Test 2: Delayed task with options
 	t.Run("DelayedTask", func(t *testing.T) {
-		processAt := time.Now().Add(time.Second) // Use 1 second delay for testing
+		processAt := time.Now().Add(3 * time.Second) // Use 3 second delay for better testing
 		delayedTask := &zentask.Task{
 			Queue: "emails",
 			Payload: map[string]interface{}{
@@ -199,7 +199,7 @@ func TestTaskExamples(t *testing.T) {
 			},
 			Metadata: map[string]interface{}{
 				"customer_id": "user123",
-				"type":        "reminder_email",
+				"type":       "reminder",
 			},
 		}
 
@@ -207,13 +207,24 @@ func TestTaskExamples(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, info.ID)
 		require.Equal(t, "emails", info.Queue)
-		require.WithinDuration(t, processAt, info.ProcessAt, time.Second)
 
-		// Wait for task processing
+		// Verify task is not processed before ProcessAt time
+		select {
+		case <-processedTasks["emails"]:
+			t.Fatal("Task was processed before ProcessAt time")
+		case <-time.After(2 * time.Second):
+			// This is expected - task should not be processed yet
+		}
+
+		// Wait for task processing after ProcessAt time
 		select {
 		case task := <-processedTasks["emails"]:
 			require.Equal(t, delayedTask.Queue, task.Queue)
-			require.Equal(t, delayedTask.Metadata, task.Metadata)
+			
+			// Verify ProcessAt time was respected
+			require.NotNil(t, task.Options)
+			require.False(t, task.Options.ProcessAt.IsZero())
+			require.Equal(t, processAt.Unix(), task.Options.ProcessAt.Unix())
 			
 			// Convert task payload to map
 			payloadBytes, err := json.Marshal(task.Payload)
@@ -225,7 +236,12 @@ func TestTaskExamples(t *testing.T) {
 			
 			require.Equal(t, "user@example.com", payload["to"])
 			require.Equal(t, "Reminder", payload["subject"])
-		case <-time.After(15 * time.Second):
+			require.Equal(t, "Don't forget your appointment tomorrow!", payload["body"])
+
+			// Verify metadata was preserved
+			require.Equal(t, "user123", task.Metadata["customer_id"])
+			require.Equal(t, "reminder", task.Metadata["type"])
+		case <-time.After(5 * time.Second):
 			t.Fatal("Timeout waiting for delayed task processing")
 		}
 	})

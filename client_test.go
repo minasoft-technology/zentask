@@ -287,10 +287,12 @@ func TestClient_EnqueueContext(t *testing.T) {
 	})
 
 	t.Run("context timeout", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		// Create a context with a very short timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 		defer cancel()
 
-		time.Sleep(time.Millisecond * 2) // Ensure timeout has occurred
+		// Sleep to ensure context is expired
+		time.Sleep(10 * time.Millisecond)
 
 		task := &Task{
 			Queue: "test-queue",
@@ -301,7 +303,7 @@ func TestClient_EnqueueContext(t *testing.T) {
 		}
 
 		info, err := client.EnqueueContext(ctx, task)
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.Nil(t, info)
 	})
 }
