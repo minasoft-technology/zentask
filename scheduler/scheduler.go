@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,28 +22,85 @@ type Schedule struct {
 	LastRun     time.Time              `json:"last_run"`    // Last execution time
 	NextRun     time.Time              `json:"next_run"`    // Next scheduled execution
 	Description string                 `json:"description"` // Human-readable description
+	cronEntryID cron.EntryID          // Internal cron job ID
 }
+
+// SchedulerOption configures a Scheduler
+type SchedulerOption func(*Scheduler)
 
 // Scheduler manages scheduled tasks using cron expressions
 type Scheduler struct {
-	client    *zentask.Client
-	cron      *cron.Cron
-	schedules map[string]*Schedule
-	mu        sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
+	client     *zentask.Client
+	cron       *cron.Cron
+	schedules  map[string]*Schedule
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	useSeconds bool
+	location   *time.Location
+	logger     cron.Logger
 }
 
-// NewScheduler creates a new scheduler
-func NewScheduler(client *zentask.Client) *Scheduler {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Scheduler{
-		client:    client,
-		cron:      cron.New(cron.WithSeconds()),
-		schedules: make(map[string]*Schedule),
-		ctx:       ctx,
-		cancel:    cancel,
+// WithLocation sets the time location for the scheduler
+func WithLocation(loc *time.Location) SchedulerOption {
+	return func(s *Scheduler) {
+		s.location = loc
+		s.recreateCron()
 	}
+}
+
+// WithLogger sets a logger for the scheduler
+func WithLogger(logger cron.Logger) SchedulerOption {
+	return func(s *Scheduler) {
+		s.logger = logger
+		s.recreateCron()
+	}
+}
+
+// WithSeconds enables the seconds field in cron expressions
+func WithSeconds(enabled bool) SchedulerOption {
+	return func(s *Scheduler) {
+		s.useSeconds = enabled
+		s.recreateCron()
+	}
+}
+
+// recreateCron recreates the cron instance with current settings
+func (s *Scheduler) recreateCron() {
+	opts := []cron.Option{}
+	if s.useSeconds {
+		opts = append(opts, cron.WithSeconds())
+	}
+	if s.location != nil {
+		opts = append(opts, cron.WithLocation(s.location))
+	}
+	if s.logger != nil {
+		opts = append(opts, cron.WithLogger(s.logger))
+	}
+	s.cron = cron.New(opts...)
+}
+
+// NewScheduler creates a new scheduler with the given options
+func NewScheduler(client *zentask.Client, opts ...SchedulerOption) *Scheduler {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Scheduler{
+		client:     client,
+		schedules:  make(map[string]*Schedule),
+		ctx:        ctx,
+		cancel:     cancel,
+		useSeconds: false,
+		location:   time.Local,
+	}
+
+	// Initialize cron with default settings
+	s.recreateCron()
+
+	// Apply options
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
 }
 
 // AddSchedule adds a new scheduled task
@@ -50,21 +108,29 @@ func (s *Scheduler) AddSchedule(schedule *Schedule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Parse cron expression with support for seconds field
-	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, err := parser.Parse(schedule.CronExpr)
-	if err != nil {
-		return fmt.Errorf("invalid cron expression: %v", err)
+	if _, exists := s.schedules[schedule.ID]; exists {
+		return fmt.Errorf("schedule with ID %s already exists", schedule.ID)
 	}
 
-	// Calculate next run time
-	schedule.NextRun = cronSchedule.Next(time.Now())
+	// Handle both 5 and 6 field expressions
+	cronExpr := schedule.CronExpr
+	fields := strings.Fields(cronExpr)
+	if len(fields) == 5 && !s.useSeconds {
+		// Standard 5-field expression with standard cron
+		// No modification needed
+	} else if len(fields) == 5 && s.useSeconds {
+		// Add "0" as the seconds field
+		cronExpr = "0 " + cronExpr
+	} else if len(fields) == 6 && !s.useSeconds {
+		return fmt.Errorf("6-field cron expression provided but seconds are not enabled. Use WithSeconds(true) option when creating the scheduler")
+	}
 
 	// Create the cron job
-	_, err = s.cron.AddFunc(schedule.CronExpr, func() {
+	entryID, err := s.cron.AddFunc(cronExpr, func() {
 		s.mu.Lock()
 		schedule.LastRun = time.Now()
-		schedule.NextRun = cronSchedule.Next(time.Now())
+		entry := s.cron.Entry(schedule.cronEntryID)
+		schedule.NextRun = entry.Next
 		s.mu.Unlock()
 
 		// Create and enqueue the task
@@ -95,19 +161,24 @@ func (s *Scheduler) AddSchedule(schedule *Schedule) error {
 		return fmt.Errorf("failed to add cron job: %v", err)
 	}
 
+	schedule.cronEntryID = entryID
+	entry := s.cron.Entry(entryID)
+	schedule.NextRun = entry.Next
 	s.schedules[schedule.ID] = schedule
 	return nil
 }
 
-// RemoveSchedule removes a scheduled task
+// RemoveSchedule removes a schedule by ID
 func (s *Scheduler) RemoveSchedule(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.schedules[id]; !exists {
-		return fmt.Errorf("schedule not found: %s", id)
+	schedule, exists := s.schedules[id]
+	if !exists {
+		return fmt.Errorf("schedule with ID %s not found", id)
 	}
 
+	s.cron.Remove(schedule.cronEntryID)
 	delete(s.schedules, id)
 	return nil
 }
@@ -119,7 +190,7 @@ func (s *Scheduler) GetSchedule(id string) (*Schedule, error) {
 
 	schedule, exists := s.schedules[id]
 	if !exists {
-		return nil, fmt.Errorf("schedule not found: %s", id)
+		return nil, fmt.Errorf("schedule with ID %s not found", id)
 	}
 
 	return schedule, nil
@@ -142,8 +213,8 @@ func (s *Scheduler) Start() {
 	s.cron.Start()
 }
 
-// Stop stops the scheduler
+// Stop stops the scheduler and waits for all running jobs to complete
 func (s *Scheduler) Stop() {
 	s.cancel()
-	s.cron.Stop()
+	<-s.cron.Stop().Done()
 }
