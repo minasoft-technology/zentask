@@ -1,0 +1,86 @@
+version: '3'
+
+vars:
+  BINARY_NAME: zentask
+  BUILD_DIR: build
+  MAIN_PATH: cmd/zentask/main.go
+
+tasks:
+  default:
+    cmds:
+      - task: run
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}
+      - rm -rf ~/.zentask/nats-data
+
+  build:
+    desc: Build the application
+    deps:
+      - clean
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.MAIN_PATH}}
+    sources:
+      - ./**/*.go
+    generates:
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
+    silent: true
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+    sources:
+      - ./**/*.go
+      - ./**/*_test.go
+
+  run:
+    desc: Run the application
+    deps:
+      - build
+    cmds:
+      - ./{{.BUILD_DIR}}/{{.BINARY_NAME}}
+    silent: true
+
+  demo:
+    desc: Run the task demo
+    cmds:
+      - go run examples/task_demo.go
+
+  lint:
+    desc: Run linters
+    cmds:
+      - go vet ./...
+      - task: golangci-lint
+
+  golangci-lint:
+    internal: true
+    cmds:
+      - |
+        if command -v golangci-lint >/dev/null 2>&1; then
+          golangci-lint run
+        else
+          echo "golangci-lint is not installed. Run: task install-tools"
+          exit 1
+        fi
+
+  mod-tidy:
+    desc: Tidy and verify dependencies
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  install-tools:
+    desc: Install development tools
+    cmds:
+      - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+  all:
+    desc: Run lint, test, and build
+    cmds:
+      - task: lint
+      - task: test
+      - task: build

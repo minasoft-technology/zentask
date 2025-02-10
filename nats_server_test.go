@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/log"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"log/slog"
 )
 
 func TestNATSServer(t *testing.T) {
@@ -20,9 +20,9 @@ func TestNATSServer(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	// Setup logger
-	logger := log.NewWithOptions(os.Stderr, log.Options{
-		Level: log.DebugLevel,
-	})
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 
 	// Create config with random ports for parallel testing
 	config := NATSConfig{

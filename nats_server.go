@@ -3,19 +3,19 @@ package zentask
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/charmbracelet/log"
 	"github.com/nats-io/nats-server/v2/server"
 )
 
 // Default configuration values
 const (
-	DefaultNATSPort = 4222
+	DefaultNATSPort = 14222
 	DefaultNATSHost = "0.0.0.0"
-	DefaultHTTPPort = 8222
+	DefaultHTTPPort = 18222
 	DefaultHTTPHost = "0.0.0.0"
 )
 
@@ -35,9 +35,11 @@ type NATSConfig struct {
 	HTTPPort int    // Port for monitoring HTTP (default: 8222)
 	HTTPHost string // Host for monitoring HTTP (default: "0.0.0.0")
 	StoreDir string // Directory for storing NATS data (default: ~/.zentask/nats-data)
+	Username string // Username for NATS authentication
+	Password string // Password for NATS authentication
 	Debug    bool   // Enable debug logging for NATS server
 	Trace    bool   // Enable trace logging for NATS server
-	Logger   *log.Logger
+	Logger   *slog.Logger
 }
 
 // NATSServer represents the embedded NATS server
@@ -94,6 +96,8 @@ func NewNATSServer(ctx context.Context, config NATSConfig) (*NATSServer, error) 
 		Debug:      config.Debug,
 		Trace:      config.Trace,
 		NoLog:      config.Logger == nil,
+		Username:   config.Username,
+		Password:   config.Password,
 	}
 
 	// Use random ports if not specified
@@ -167,7 +171,7 @@ func (ns *NATSServer) GetConnectionURL() string {
 
 // NATSLogger implements the NATS server.Logger interface
 type NATSLogger struct {
-	logger *log.Logger
+	logger *slog.Logger
 }
 
 func (l *NATSLogger) Noticef(format string, v ...interface{}) {
@@ -192,5 +196,7 @@ func (l *NATSLogger) Debugf(format string, v ...interface{}) {
 }
 
 func (l *NATSLogger) Tracef(format string, v ...interface{}) {
-	l.logger.Debug(fmt.Sprintf(format, v...))
+	if l.logger != nil {
+		l.logger.Debug(fmt.Sprintf(format, v...))
+	}
 }

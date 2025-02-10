@@ -26,6 +26,10 @@ type Repository interface {
 	Watch(ctx context.Context, taskID string) (<-chan *Task, error)
 	// Enqueue adds a task to the queue for processing
 	Enqueue(ctx context.Context, task *Task) error
+	// NewTask creates a new TaskBuilder for fluent task creation
+	NewTask(name string) *TaskBuilder
+	// EnqueueTask is a convenience method to create and enqueue a task in one call
+	EnqueueTask(ctx context.Context, name string, opts ...TaskOption) (*Task, error)
 }
 
 // Filter defines criteria for filtering tasks
@@ -37,19 +41,22 @@ type Filter struct {
 	Until    time.Time
 }
 
+// TaskOption defines a function type for configuring tasks
+type TaskOption func(*TaskBuilder)
+
 // JetStreamRepository implements Repository using NATS JetStream
 type JetStreamRepository struct {
 	js nats.JetStreamContext
 }
 
 const (
-	streamName          = "tasks"
-	streamSubjects      = "tasks.>"
-	taskSubject         = "tasks.updates.%s"
+	streamName           = "tasks"
+	streamSubjects       = "tasks.>"
+	taskSubject          = "tasks.updates.%s"
 	immediateTaskSubject = "tasks.queue.immediate.%s"
 	scheduledTaskSubject = "tasks.queue.scheduled.%s"
-	delayedTaskSubject  = "tasks.queue.delayed.%s"
-	queueGroup         = "task_processors"
+	delayedTaskSubject   = "tasks.queue.delayed.%s"
+	queueGroup           = "task_processors"
 
 	// Subjects for different types of tasks
 )
@@ -68,8 +75,8 @@ func NewJetStreamRepository(js nats.JetStreamContext) (*JetStreamRepository, err
 				"tasks.queue.delayed.>",
 				"tasks.updates.>",
 			},
-			Storage:  nats.FileStorage,
-			MaxAge:   30 * 24 * time.Hour, // Keep messages for 30 days
+			Storage: nats.FileStorage,
+			MaxAge:  30 * 24 * time.Hour, // Keep messages for 30 days
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stream: %w", err)
@@ -270,7 +277,7 @@ func (r *JetStreamRepository) List(ctx context.Context, filter *Filter) ([]*Task
 func (r *JetStreamRepository) Watch(ctx context.Context, taskID string) (<-chan *Task, error) {
 	// Create a unique durable name for this subscription
 	durableName := fmt.Sprintf("watch_%s", taskID)
-	
+
 	// Create a pull subscription
 	sub, err := r.js.PullSubscribe(
 		fmt.Sprintf(taskSubject, taskID),
@@ -381,63 +388,140 @@ func (r *JetStreamRepository) Enqueue(ctx context.Context, task *Task) error {
 	return nil
 }
 
-// matchesFilter checks if a task matches the given filter criteria
+// matchesStatus checks if the task status matches any of the filter statuses
+func matchesStatus(task *Task, statuses []Status) bool {
+	if len(statuses) == 0 {
+		return true
+	}
+	for _, s := range statuses {
+		if task.Status == s {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesPriority checks if the task priority matches any of the filter priorities
+func matchesPriority(task *Task, priorities []Priority) bool {
+	if len(priorities) == 0 {
+		return true
+	}
+	for _, p := range priorities {
+		if task.Priority == p {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesTags checks if the task has all the required tags from the filter
+func matchesTags(task *Task, filterTags []string) bool {
+	if len(filterTags) == 0 {
+		return true
+	}
+	for _, tag := range filterTags {
+		tagFound := false
+		for _, taskTag := range task.Tags {
+			if taskTag == tag {
+				tagFound = true
+				break
+			}
+		}
+		if !tagFound {
+			return false
+		}
+	}
+	return true
+}
+
+// matchesTimeRange checks if the task was created within the specified time range
+func matchesTimeRange(task *Task, since, until time.Time) bool {
+	if !since.IsZero() && task.CreatedAt.Before(since) {
+		return false
+	}
+	if !until.IsZero() && task.CreatedAt.After(until) {
+		return false
+	}
+	return true
+}
+
 func matchesFilter(task *Task, filter *Filter) bool {
 	if filter == nil {
 		return true
 	}
 
-	// Check status
-	if len(filter.Status) > 0 {
-		statusMatch := false
-		for _, s := range filter.Status {
-			if task.Status == s {
-				statusMatch = true
-				break
-			}
-		}
-		if !statusMatch {
-			return false
-		}
-	}
+	return matchesStatus(task, filter.Status) &&
+		matchesPriority(task, filter.Priority) &&
+		matchesTags(task, filter.Tags) &&
+		matchesTimeRange(task, filter.Since, filter.Until)
+}
 
-	// Check priority
-	if len(filter.Priority) > 0 {
-		priorityMatch := false
-		for _, p := range filter.Priority {
-			if task.Priority == p {
-				priorityMatch = true
-				break
-			}
-		}
-		if !priorityMatch {
-			return false
-		}
-	}
+// NewTask creates a new TaskBuilder for fluent task creation
+func (r *JetStreamRepository) NewTask(name string) *TaskBuilder {
+	return NewTask(name).WithRepository(r)
+}
 
-	// Check tags
-	if len(filter.Tags) > 0 {
-		for _, tag := range filter.Tags {
-			tagFound := false
-			for _, taskTag := range task.Tags {
-				if taskTag == tag {
-					tagFound = true
-					break
-				}
-			}
-			if !tagFound {
-				return false
-			}
-		}
+// EnqueueTask is a convenience method to create and enqueue a task in one call
+func (r *JetStreamRepository) EnqueueTask(ctx context.Context, name string, opts ...TaskOption) (*Task, error) {
+	builder := r.NewTask(name)
+	for _, opt := range opts {
+		opt(builder)
 	}
+	return builder.Enqueue(ctx)
+}
 
-	// Check time range
-	if !filter.Since.IsZero() && task.CreatedAt.Before(filter.Since) {
-		return false
+// WithDescription returns a TaskOption that sets the task description
+func WithDescription(description string) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithDescription(description)
 	}
-	if !filter.Until.IsZero() && task.CreatedAt.After(filter.Until) {
-		return false
-	}
+}
 
-	return true
+// WithPriority returns a TaskOption that sets the task priority
+func WithPriority(priority Priority) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithPriority(priority)
+	}
+}
+
+// WithPayload returns a TaskOption that sets the task payload
+func WithPayload(payloadType string, payloadData interface{}) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithPayload(payloadType, payloadData)
+	}
+}
+
+// WithTags returns a TaskOption that sets the task tags
+func WithTags(tags ...string) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithTags(tags...)
+	}
+}
+
+// WithMetadata returns a TaskOption that adds metadata to the task
+func WithMetadata(key string, value interface{}) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithMetadata(key, value)
+	}
+}
+
+// WithMaxRetries returns a TaskOption that sets the maximum number of retries
+func WithMaxRetries(maxRetries int) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithMaxRetries(maxRetries)
+	}
+}
+
+// WithDelay returns a TaskOption that sets the task delay duration
+func WithDelay(delay time.Duration) TaskOption {
+	return func(b *TaskBuilder) {
+		b.WithDelay(delay)
+	}
+}
+
+// WithSchedule returns a TaskOption that sets the task schedule
+func WithSchedule(cronExpression string) TaskOption {
+	return func(b *TaskBuilder) {
+		b.Schedule(cronExpression)
+	}
 }

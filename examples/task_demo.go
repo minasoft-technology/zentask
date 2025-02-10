@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/log"
 	"github.com/minasoft-technology/zentask"
 	"github.com/minasoft-technology/zentask/task"
 	"github.com/nats-io/nats.go"
@@ -20,12 +20,9 @@ func main() {
 	defer cancel()
 
 	// Initialize logger
-	logger := log.NewWithOptions(os.Stderr, log.Options{
-		Level:           log.DebugLevel,
-		TimeFormat:      time.Kitchen,
-		ReportCaller:    false,
-		ReportTimestamp: true,
-	})
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 
 	// Create NATS server configuration
 	config := zentask.NATSConfig{
@@ -33,8 +30,10 @@ func main() {
 		NATSHost: "127.0.0.1", // Use localhost instead of 0.0.0.0
 		HTTPPort: 8223,
 		HTTPHost: "127.0.0.1", // Use localhost instead of 0.0.0.0
-		Debug:    true,
+		Debug:    false,
 		Logger:   logger,
+		Username: "zentask_user",     // Add username for authentication
+		Password: "zentask_password", // Add password for authentication
 	}
 
 	// Start embedded NATS server
@@ -66,6 +65,7 @@ func main() {
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name:     "TASKS",
 		Subjects: []string{"TASKS.*"},
+		Storage:  nats.MemoryStorage,
 	})
 	if err != nil {
 		logger.Error("Failed to create stream", "error", err)
@@ -91,26 +91,29 @@ func main() {
 		logger.Info("Processing immediate task",
 			"name", t.Name,
 			"id", t.ID,
-			"attempt", t.RetryCount)
-		time.Sleep(1 * time.Second) // Simulate work
-		return nil
-	})
-
-	processor.RegisterHandler("delayed_task", func(ctx context.Context, t *task.Task) error {
-		logger.Info("Processing delayed task",
-			"name", t.Name,
-			"id", t.ID,
-			"attempt", t.RetryCount)
-		time.Sleep(1 * time.Second) // Simulate work
+			"attempt", t.RetryCount,
+			"payload", t.Payload)
+		time.Sleep(2 * time.Second) // Simulate work
 		return nil
 	})
 
 	processor.RegisterHandler("failing_task", func(ctx context.Context, t *task.Task) error {
-		logger.Warn("Processing failing task",
+		logger.Info("Processing failing task",
 			"name", t.Name,
 			"id", t.ID,
-			"attempt", t.RetryCount)
-		return fmt.Errorf("simulated failure")
+			"attempt", t.RetryCount,
+			"max_retries", t.MaxRetries)
+
+		// Fail on first two attempts, succeed on third
+		if t.RetryCount < 2 {
+			return fmt.Errorf("simulated failure (attempt %d of %d)", t.RetryCount+1, t.MaxRetries)
+		}
+
+		logger.Info("Task succeeded after retries",
+			"name", t.Name,
+			"id", t.ID,
+			"final_attempt", t.RetryCount)
+		return nil
 	})
 
 	// Start the processor
@@ -118,105 +121,90 @@ func main() {
 		logger.Error("Failed to start processor", "error", err)
 		os.Exit(1)
 	}
-	defer processor.Stop()
 
-	// Create and enqueue different types of tasks
-	ctx = context.Background()
-
-	// 1. Immediate task
-	immediateTask, err := task.NewTask("Immediate Task").
-		WithDescription("Task that runs immediately").
-		WithPayload("immediate_task", map[string]string{"key": "value"}).
-		Build()
-	if err != nil {
-		logger.Error("Failed to create immediate task", "error", err)
-		os.Exit(1)
-	}
-	if err := repo.Enqueue(ctx, immediateTask); err != nil {
-		logger.Error("Failed to enqueue immediate task", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("Enqueued immediate task", "id", immediateTask.ID)
-
-	// 2. Delayed task
-	delayedTask, err := task.NewTask("Delayed Task").
-		WithDescription("Task that runs after a delay").
-		WithPayload("delayed_task", map[string]string{"key": "value"}).
-		WithDelay(5 * time.Second).
-		Build()
-	if err != nil {
-		logger.Error("Failed to create delayed task", "error", err)
-		os.Exit(1)
-	}
-	if err := repo.Enqueue(ctx, delayedTask); err != nil {
-		logger.Error("Failed to enqueue delayed task", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("Enqueued delayed task", "id", delayedTask.ID)
-
-	// 3. Failing task
-	failingTask, err := task.NewTask("Failing Task").
-		WithDescription("Task that always fails").
-		WithPayload("failing_task", map[string]string{"key": "value"}).
-		WithMaxRetries(3). // Add retry configuration
-		Build()
-	if err != nil {
-		logger.Error("Failed to create failing task", "error", err)
-		os.Exit(1)
-	}
-	if err := repo.Enqueue(ctx, failingTask); err != nil {
-		logger.Error("Failed to enqueue failing task", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("Enqueued failing task", "id", failingTask.ID)
-
-	// Watch for task updates
-	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Watch for updates on both tasks
-	updates, err := repo.Watch(watchCtx, immediateTask.ID)
-	if err != nil {
-		logger.Error("Watch error for task", "error", err)
-		os.Exit(1)
+	// Create some example tasks
+	tasks := []struct {
+		name       string
+		taskType   string
+		maxRetries int
+		delay      time.Duration
+	}{
+		{
+			name:       "Simple Task",
+			taskType:   "immediate_task",
+			maxRetries: 0,
+			delay:      0,
+		},
+		{
+			name:       "Retry Task",
+			taskType:   "failing_task",
+			maxRetries: 3,
+			delay:      time.Second,
+		},
 	}
 
-	failingUpdates, err := repo.Watch(watchCtx, failingTask.ID)
-	if err != nil {
-		logger.Error("Watch error for failing task", "error", err)
-		os.Exit(1)
-	}
+	// Create and watch tasks
+	for _, t := range tasks {
+		taskBuilder := task.NewTask(t.name).
+			WithRepository(repo).
+			WithPayload(t.taskType, map[string]interface{}{
+				"name": t.name,
+				"type": t.taskType,
+			}).
+			WithMaxRetries(t.maxRetries)
 
-	// Print task updates
-	go func() {
-		for {
-			select {
-			case t := <-updates:
-				logger.Info("Task update",
-					"id", t.ID,
-					"status", t.Status,
-					"error", t.Error)
-			case t := <-failingUpdates:
-				if t.Error != "" {
-					logger.Error("Failing task update",
-						"id", t.ID,
-						"status", t.Status,
-						"error", t.Error)
-				} else {
-					logger.Info("Failing task update",
-						"id", t.ID,
-						"status", t.Status)
-				}
-			case <-watchCtx.Done():
-				return
-			}
+		if t.delay > 0 {
+			taskBuilder.WithDelay(t.delay)
 		}
-	}()
 
-	// Wait for interrupt signal
+		createdTask, err := taskBuilder.Enqueue(ctx)
+		if err != nil {
+			logger.Error("Failed to create task",
+				"name", t.name,
+				"error", err)
+			continue
+		}
+
+		logger.Info("Task created successfully",
+			"name", t.name,
+			"id", createdTask.ID,
+			"type", t.taskType)
+
+		// Watch task updates
+		updates, err := repo.Watch(ctx, createdTask.ID)
+		if err != nil {
+			logger.Error("Failed to watch task",
+				"id", createdTask.ID,
+				"error", err)
+			continue
+		}
+
+		go func(taskName string, taskID string) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case update := <-updates:
+					if update == nil {
+						return
+					}
+					logger.Info("Task status update",
+						"name", taskName,
+						"id", taskID,
+						"status", update.Status,
+						"attempt", update.RetryCount,
+						"error", update.Error)
+				}
+			}
+		}(t.name, createdTask.ID)
+	}
+
+	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
 
+	<-sigChan
 	logger.Info("Shutting down...")
+	cancel()
+	time.Sleep(time.Second) // Give tasks time to clean up
 }
