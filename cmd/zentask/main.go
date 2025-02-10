@@ -34,10 +34,12 @@ func main() {
 		logger.Error("Failed to create NATS server", "error", err)
 	}
 
-	// Connect to the embedded NATS server
-	nc, err := nats.Connect(natsServer.GetConnectionURL())
+	// Connect to the embedded NATS server with authentication
+	nc, err := nats.Connect(natsServer.GetConnectionURL(),
+		nats.UserInfo(natsConfig.Username, natsConfig.Password))
 	if err != nil {
 		logger.Error("Failed to connect to NATS", "error", err)
+		panic(err) // Exit if we can't connect to NATS
 	}
 	defer nc.Close()
 
@@ -45,6 +47,7 @@ func main() {
 	js, err := nc.JetStream()
 	if err != nil {
 		logger.Error("Failed to create JetStream context", "error", err)
+		panic(err) // Exit if we can't create JetStream context
 	}
 
 	// Initialize task repository

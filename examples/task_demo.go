@@ -46,8 +46,9 @@ func main() {
 
 	logger.Info("NATS server started successfully", "url", ns.GetConnectionURL())
 
-	// Connect to NATS using the server's URL
-	nc, err := nats.Connect(ns.GetConnectionURL())
+	// Connect to NATS using the server's URL with authentication
+	nc, err := nats.Connect(ns.GetConnectionURL(),
+		nats.UserInfo(config.Username, config.Password))
 	if err != nil {
 		logger.Error("Failed to connect to NATS", "error", err)
 		os.Exit(1)
